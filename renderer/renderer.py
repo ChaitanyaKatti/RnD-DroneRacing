@@ -90,11 +90,11 @@ class DroneRenderer:
 
         # Create and setup grid VAO/VBO
         grid_size = 10
-        grid_step = 1
+        grid_step = 0.5
         grid_vertices = []
         grid_color = [0.5, 0.5, 0.5]  # Gray color for grid
 
-        for i in range(-grid_size, grid_size + 1, grid_step):
+        for i in np.arange(-grid_size, grid_size + grid_step, grid_step):
             # Lines along X-axis
             grid_vertices.extend([i, -grid_size, -2] + grid_color)
             grid_vertices.extend([i, grid_size, -2] + grid_color)
@@ -163,7 +163,10 @@ class DroneRenderer:
         # Set OpenGL state
         glEnable(GL_DEPTH_TEST)
         glLineWidth(2.0)
-        glClearColor(0.2, 0.2, 0.2, 1.0)  # Dark gray background
+        glClearColor(0.2, 0.2, 0.4, 1.0)  # Dark gray background
+        glEnable(GL_MULTISAMPLE)
+        glEnable (GL_LINE_SMOOTH)
+        glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
         glPointSize(5.0)
 
     def update_fps(self):
