@@ -45,11 +45,10 @@ if __name__ == "__main__":
     )
 
     # Train the model.
-    # model = PPO.load("./logs/best_model/best_model.zip", env=vec_env, device="cpu")
-    # model.learn(total_timesteps=TOTAL_TIMESTEPS, callback=eval_callback, progress_bar=True)
+    model.learn(total_timesteps=TOTAL_TIMESTEPS, callback=eval_callback, progress_bar=True)
     
     # Load the best saved model.
-    model = PPO.load("./logs/best_model/best_model_circle_2.zip", env=vec_env, device="cpu")
+    model = PPO.load("./logs/best_model/best_model.zip", env=vec_env, device="cpu")
 
     input("Training Complete\nPress Enter to continue...")
     

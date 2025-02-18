@@ -176,7 +176,7 @@ class QuadrotorEnv(gym.Env):
         projected = self.project_trajectory()
         reward  = 0.001
         reward -= 0.001 * np.linalg.norm(self.state[0:3] - projected)
-        # reward += 0.001 * np.dot(self.state[3:6], self.trajectory_derivative())
+        reward += 0.001 * np.dot(self.state[3:6], self.trajectory_derivative()) / np.linalg.norm(self.state[3:6])
         reward -= 0.001 * np.linalg.norm(self.state[3:6] - self.trajectory_derivative())
         done = False
         truncated = False
