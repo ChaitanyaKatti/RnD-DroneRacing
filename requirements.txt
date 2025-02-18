@@ -1,0 +1,6 @@
+stable-baselines3[extra]
+numba
+pygame
+PyOpenGL
+glfw
+pycollada
