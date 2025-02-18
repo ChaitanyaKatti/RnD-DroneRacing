@@ -49,8 +49,12 @@ class QuadrotorEnv(gym.Env):
         self.step_count = 0
         self.state = np.zeros(13)
         self.state[:3] = self.trajectory(np.random.uniform(0, 1))  + np.random.uniform(-0.1, 0.1, 3)  # Initial position
+        yaw = np.random.uniform(0, 2 * np.pi)
+        self.state[6] = np.cos(yaw / 2)  # w component
+        self.state[7] = 0.0              # x component
+        self.state[8] = 0.0              # y component
+        self.state[9] = np.sin(yaw / 2)  # z component
         self.state[10:13] = np.random.uniform(-0.1, 0.1, 3)  # Initial angular rates
-        self.state[6] = 1.0  # Initial quaternion (w=1, i.e., no rotation)
         obs = np.concatenate(
             [
                 self.state[:3],  # Position
@@ -175,8 +179,8 @@ class QuadrotorEnv(gym.Env):
     def compute_reward(self):
         projected = self.project_trajectory()
         reward  = 0.001
-        reward -= 0.001 * np.linalg.norm(self.state[0:3] - projected)
-        reward += 0.001 * np.dot(self.state[3:6], self.trajectory_derivative()) / np.linalg.norm(self.state[3:6])
+        reward -= 0.002 * np.linalg.norm(self.state[0:3] - projected)
+        # reward += 0.001 * np.dot(self.state[3:6], self.trajectory_derivative()) / np.linalg.norm(self.state[3:6])
         reward -= 0.001 * np.linalg.norm(self.state[3:6] - self.trajectory_derivative())
         done = False
         truncated = False
