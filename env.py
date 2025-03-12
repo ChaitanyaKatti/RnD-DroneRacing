@@ -7,6 +7,7 @@ import pybullet as p
 import pybullet_data
 import gymnasium as gym
 from gate_config import gate_positions, gate_orientations
+import pygame
 
 class RacingEnv(gym.Env):
     def __init__(self,
@@ -17,7 +18,7 @@ class RacingEnv(gym.Env):
                  output_folder='results'
                  ):
         #### Constants #############################################
-        self.G = 9.8
+        self.G = 0.0
         self.RAD2DEG = 180 / np.pi
         self.DEG2RAD = np.pi / 180
         self.CTRL_FREQ = ctrl_freq
@@ -64,7 +65,6 @@ class RacingEnv(gym.Env):
         self.MAX_THRUST = (4*self.KF*self.MAX_RPM**2)
         self.INIT_XYZ = [0.0, 0.0, 1.0]
         self.INIT_RPYS = [0.0, 0.0, 0.0]
-        
 
         #### Connect to PyBullet ###################################
         if self.GUI:
@@ -86,7 +86,8 @@ class RacingEnv(gym.Env):
 
         #### Create action and observation spaces ##################
         self.action_space = gym.spaces.Box(
-            low=-1, high=1, shape=(4,), dtype=np.float32
+            low=np.array([0.0, -1.0, -1.0, -1.0]),
+            high=np.array([1.0, 1.0, 1.0, 1.0]),
         )
         self.observation_space = gym.spaces.Box(
             low=0,
@@ -107,10 +108,10 @@ class RacingEnv(gym.Env):
         return initial_obs, initial_info
 
     def step(self, action):
+        rpm = self.rate_2_rpm(action)
         for _ in range(self.PYB_STEPS_PER_CTRL):
-            if self.PYB_STEPS_PER_CTRL > 1:
-                self._updateAndStoreKinematicInformation()
-            self._PyBulletDynamics(action)
+            self._updateAndStoreKinematicInformation()
+            self._PyBulletDynamics(rpm)
             p.stepSimulation(physicsClientId=self.CLIENT)
 
         self.last_action = action
@@ -194,7 +195,9 @@ class RacingEnv(gym.Env):
         self.pos, self.quat = p.getBasePositionAndOrientation(self.DRONE_ID, physicsClientId=self.CLIENT)
         self.rpy = p.getEulerFromQuaternion(self.quat)
         self.vel, self.ang_v = p.getBaseVelocity(self.DRONE_ID, physicsClientId=self.CLIENT)
-
+        self.rpy_rates = np.dot(np.array(p.getMatrixFromQuaternion(self.quat)).reshape(3, 3).T, self.ang_v)
+        # print(self.rpy_rates)
+        
     def _getImages(self):
         rot_mat = np.array(p.getMatrixFromQuaternion(self.quat)).reshape(3, 3)
         target = np.dot(rot_mat,np.array([1000, 0, 0])) + np.array(self.pos)
@@ -258,7 +261,6 @@ class RacingEnv(gym.Env):
         vel = self.vel
         rpy_rates = self.rpy_rates
         rotation = np.array(p.getMatrixFromQuaternion(quat)).reshape(3, 3)
-
         #### Compute forces and torques ############################
         forces = np.array(rpm**2) * self.KF
         thrust = np.array([0, 0, np.sum(forces)])
@@ -272,7 +274,6 @@ class RacingEnv(gym.Env):
         torques = torques - np.cross(rpy_rates, np.dot(self.J, rpy_rates))
         rpy_rates_deriv = np.dot(self.J_INV, torques)
         no_pybullet_dyn_accs = force_world_frame / self.M
-
         #### Update state ##########################################
         vel = vel + self.PYB_TIMESTEP * no_pybullet_dyn_accs
         rpy_rates = rpy_rates + self.PYB_TIMESTEP * rpy_rates_deriv
@@ -370,8 +371,26 @@ class RacingEnv(gym.Env):
             gate_mask += (self.seg == gate_id)
         return gate_mask.astype('float32')
 
-    def _preprocessAction(self, action):
-        return action
+    def rate_2_rpm(self, action):
+        thrust = action[0] * self.MAX_THRUST
+        desired_rate = np.array([action[1], action[2], action[3]])  # roll, pitch, yaw rate
+        rate_error = desired_rate
+        torque = np.dot(self.J, 10 * rate_error)  # Added P-gain here
+        print(100*torque)
+        MixerMatrix = np.array([
+            np.array([1,  1,  1,  1], dtype=np.float32),                      # Total thrust
+            np.array([-1,  1,  1, -1], dtype=np.float32) * self.L/np.sqrt(2),  # Roll torque
+            np.array([ 1,  1, -1, -1], dtype=np.float32) * self.L/np.sqrt(2),  # Pitch torque
+            np.array([-1,  1, -1,  1], dtype=np.float32) * self.KM            # Yaw torque
+        ])
+
+        forces = MixerMatrix @ np.array([thrust, torque[0], torque[1], torque[2]])
+        forces = np.clip(forces, 0, self.MAX_THRUST/4)  # Prevent negative values
+        rpm = np.sqrt(forces / self.KF)  # Convert to RPM
+        # print(forces)
+        print('RPM:', rpm)
+
+        return rpm
 
     def _computeReward(self):
         return 0.0
@@ -388,10 +407,26 @@ class RacingEnv(gym.Env):
 if __name__ == "__main__":
     env = RacingEnv("./models/cf2/cf2x.urdf", gui=True)
     obs, info = env.reset()
-    for i in range(1000):
-        print(i)
-        action = env.action_space.sample()
+
+    pygame.init()
+    pygame.joystick.init()
+    joystick = pygame.joystick.Joystick(0)
+    joystick.init()
+
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                raise KeyboardInterrupt
+
+        thrust = (joystick.get_axis(2) + 1) / 2
+        roll = joystick.get_axis(3)
+        pitch = joystick.get_axis(1)
+        yaw = -joystick.get_axis(0)
+
+        action = np.array([thrust, roll, pitch, yaw])
         obs, reward, terminated, truncated, info = env.step(action)
         if terminated:
             break
+
     env.close()
+    pygame.quit()

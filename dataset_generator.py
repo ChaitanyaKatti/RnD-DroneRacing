@@ -4,6 +4,7 @@ import numpy as np
 import cv2
 import os
 import matplotlib.pyplot as plt
+from gate_config import trajectory, gate_orientations, gate_positions
 
 NUM_IMAGES = 1000
 
@@ -44,11 +45,15 @@ os.makedirs("./dataset/seg", exist_ok=True)
 seg_means = np.zeros(NUM_IMAGES)
 
 def get_random_matrix():
-    pos = np.random.uniform(-1, 1, 3) # Random Position Vector
-    pos = pos * np.array([10, 10, 1]) + np.array([0, 0, 1]) # Scale and shift
-    rpy = np.random.uniform(-1, 1, 3) # Random Euler angles
-    rpy = rpy * np.array([np.pi, np.pi/2, np.pi]) # Scale
-    orn = p.getQuaternionFromEuler(rpy)
+    # pos = np.random.uniform(-1, 1, 3) # Random Position Vector
+    # pos = pos * np.array([10, 10, 1]) + np.array([0, 0, 1]) # Scale and shift
+    # rpy = np.random.uniform(-1, 1, 3) # Random Euler angles
+    # rpy = rpy * np.array([np.pi, np.pi/2, np.pi]) # Scale
+    # orn = p.getQuaternionFromEuler(rpy)
+    
+    i = np.random.randint(0, len(trajectory))
+    pos, orn = trajectory[i]
+    
     transform_matrix = np.eye(4)
     transform_matrix[:3, :3] = np.array(p.getMatrixFromQuaternion(orn)).reshape(3, 3)
     transform_matrix[3, :3] = -np.dot(pos, transform_matrix[:3, :3])
