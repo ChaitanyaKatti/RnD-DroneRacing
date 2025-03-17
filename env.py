@@ -1,39 +1,33 @@
 import time
-import pkg_resources
 import xml.etree.ElementTree as etxml
-from datetime import datetime
 import numpy as np
 import pybullet as p
 import pybullet_data
 import gymnasium as gym
-from gate_config import gate_positions, gate_orientations
-import pygame
+from gymnasium.spaces import Box, Tuple
+import cv2
+from constants import *
 
-class RacingEnv(gym.Env):
-    def __init__(self,
-                 urdf,
-                 pyb_freq: int = 240,
-                 ctrl_freq: int = 30,
-                 gui=False,
-                 output_folder='results'
-                 ):
+class BaseRL(gym.Env):
+    def __init__(
+        self,
+        URDF="./models/cf2/cf2x.urdf",
+        pyb_substeps: int = 1,
+        ctrl_freq: int = 30,
+        gui=False,
+    ):
         #### Constants #############################################
-        self.G = 0.0
+        self.URDF = URDF
+        self.G = 9.8
         self.RAD2DEG = 180 / np.pi
         self.DEG2RAD = np.pi / 180
-        self.CTRL_FREQ = ctrl_freq
-        self.PYB_FREQ = pyb_freq
-        self.IMG_RES = [64, 64]
-        if self.PYB_FREQ % self.CTRL_FREQ != 0:
-            raise ValueError(
-                "[ERROR] pyb_freq is not divisible by ctrl_freq."
-            )
-        self.PYB_STEPS_PER_CTRL = int(self.PYB_FREQ / self.CTRL_FREQ)
-        self.CTRL_TIMESTEP = 1.0 / self.CTRL_FREQ
-        self.PYB_TIMESTEP = 1.0 / self.PYB_FREQ
+        self.IMG_RES = IMG_RES
         self.GUI = gui
-        self.URDF = urdf
-        self.OUTPUT_FOLDER = output_folder
+
+        self.CTRL_FREQ = ctrl_freq
+        self.PYB_SUBSTESPS = pyb_substeps
+        self.CTRL_TIMESTEP = 1.0 / self.CTRL_FREQ
+        self.PYB_TIMESTEP = self.CTRL_TIMESTEP
 
         #### Load the drone properties from the .urdf file #########
         (
@@ -59,48 +53,56 @@ class RacingEnv(gym.Env):
             self.M, self.L, self.J[0,0], self.J[1,1], self.J[2,2], self.KF, self.KM, self.THRUST2WEIGHT_RATIO, self.MAX_SPEED_KMH, self.GND_EFF_COEFF, self.PROP_RADIUS, self.DRAG_COEFF[0], self.DRAG_COEFF[2], self.DW_COEFF_1, self.DW_COEFF_2, self.DW_COEFF_3))
 
         #### Compute constants #####################################
-        self.WEIGHT = self.G*self.M
-        self.HOVER_RPM = np.sqrt(self.WEIGHT / (4*self.KF))
-        self.MAX_RPM = np.sqrt((self.THRUST2WEIGHT_RATIO*self.WEIGHT) / (4*self.KF))
-        self.MAX_THRUST = (4*self.KF*self.MAX_RPM**2)
+        self.WEIGHT = 9.8 * self.M
+        self.HOVER_RPM = np.sqrt(self.WEIGHT / (4 * self.KF))
+        self.MAX_RPM = np.sqrt((self.THRUST2WEIGHT_RATIO * self.WEIGHT) / (4 * self.KF))
+        self.MAX_THRUST = 4 * self.KF * self.MAX_RPM**2
         self.INIT_XYZ = [0.0, 0.0, 1.0]
         self.INIT_RPYS = [0.0, 0.0, 0.0]
 
-        #### Connect to PyBullet ###################################
-        if self.GUI:
-            self.CLIENT = p.connect(p.GUI) # p.connect(p.GUI, options="--opengl2")
-            for i in [p.COV_ENABLE_RGB_BUFFER_PREVIEW, p.COV_ENABLE_DEPTH_BUFFER_PREVIEW, p.COV_ENABLE_SEGMENTATION_MARK_PREVIEW]:
-                p.configureDebugVisualizer(i, 0, physicsClientId=self.CLIENT)
-            p.resetDebugVisualizerCamera(cameraDistance=3,
-                                         cameraYaw=-30,
-                                         cameraPitch=-30,
-                                         cameraTargetPosition=[0, 0, 0],
-                                         physicsClientId=self.CLIENT
-                                         )
-            ret = p.getDebugVisualizerCamera(physicsClientId=self.CLIENT)
-            print("viewMatrix", ret[2])
-            print("projectionMatrix", ret[3])
-        else:
-            self.CLIENT = p.connect(p.DIRECT)
-            # p.setAdditionalSearchPath(pybullet_data.getDataPath()); plugin = p.loadPlugin(egl.get_filename(), "_eglRendererPlugin"); print("plugin=", plugin)
+        #### Camera parameters #####################################
+        self.FPV_ANGLE = 25.0
+        self.FOV = 110.0
+        self.NEAR = 0.01
+        self.FAR = 100.0
+        self.rgb, self.dep, self.seg = None, None, None
+
+        #### Control parameters ####################################
+        self.RATE_SCALE = np.array([2.0, 2.0, 5.0])
+        self.I_GAIN = 0.0
+        self.P_GAIN = 7000
 
         #### Create action and observation spaces ##################
+        # Action consists of thrust, roll rate, pitch rate, yaw rate
         self.action_space = gym.spaces.Box(
             low=np.array([0.0, -1.0, -1.0, -1.0]),
             high=np.array([1.0, 1.0, 1.0, 1.0]),
         )
-        self.observation_space = gym.spaces.Box(
-            low=0,
-            high=1,
-            shape=(self.IMG_RES[1], self.IMG_RES[0]),
-            dtype=np.uint8,
-        )
+        # Obs consists of img, past 3 actions, and kinematic info
+        self.observation_space = gym.spaces.Box(low=0, high=255, shape=(1, self.IMG_RES, self.IMG_RES), dtype=np.uint8)
+        # self.observation_space = gym.spaces.Tuple(
+        #     (gym.spaces.Box(low=0, high=1, shape=(self.IMG_RES, self.IMG_RES), dtype=np.float32),
+        #      gym.spaces.Box(low=-1, high=1, shape=(3, 4), dtype=np.float32),
+        #      gym.spaces.Box(low=-1, high=1, shape=(12,), dtype=np.float32))
+        # )
+        self.last_3_actions = np.zeros((3, 4))
 
+        self._initializePyBullet()
         self._housekeeping()
+        self._addDrone()
+        self._addObstacles()
         self._updateAndStoreKinematicInformation()
 
     def reset(self, seed=None, options=None):
-        p.resetSimulation(physicsClientId=self.CLIENT)
+        p.resetBasePositionAndOrientation(
+            self.DRONE_ID,
+            self.INIT_XYZ,
+            p.getQuaternionFromEuler(self.INIT_RPYS),
+            physicsClientId=self.CLIENT,
+        )
+        p.resetBaseVelocity(
+            self.DRONE_ID, [0, 0, 0], [0, 0, 0], physicsClientId=self.CLIENT
+        )
         self._housekeeping()
         self._updateAndStoreKinematicInformation()
         initial_obs = self._computeObs()
@@ -108,13 +110,13 @@ class RacingEnv(gym.Env):
         return initial_obs, initial_info
 
     def step(self, action):
-        rpm = self.rate_2_rpm(action)
-        for _ in range(self.PYB_STEPS_PER_CTRL):
-            self._updateAndStoreKinematicInformation()
-            self._PyBulletDynamics(rpm)
-            p.stepSimulation(physicsClientId=self.CLIENT)
+        rpm = self._rateController(action)
 
-        self.last_action = action
+        self._PyBulletDynamics(rpm)
+        p.stepSimulation(physicsClientId=self.CLIENT)
+
+        self.last_3_actions = np.roll(self.last_3_actions, 1, axis=0)
+        self.last_3_actions[0] = action
         self._updateAndStoreKinematicInformation()
 
         obs = self._computeObs()
@@ -124,28 +126,59 @@ class RacingEnv(gym.Env):
         info = self._computeInfo()
 
         #### Advance the step counter ##############################
-        self.step_counter = self.step_counter + self.PYB_STEPS_PER_CTRL
+        self.step_counter += 1
         return obs, reward, terminated, truncated, info
 
-    def render(self,
-               mode='human',
-               close=False
-               ):
-        if self.first_render_call and not self.GUI:
-            print("[WARNING] BaseAviary.render() is implemented as text-only, re-initialize the environment using Aviary(gui=True) to use PyBullet's graphical interface")
-            self.first_render_call = False
-        print("\n[INFO] BaseAviary.render() ——— it {:04d}".format(self.step_counter),
-              "——— wall-clock time {:.1f}s,".format(time.time()-self.RESET_TIME),
-              "simulation time {:.1f}s@{:d}Hz ({:.2f}x)".format(self.step_counter*self.PYB_TIMESTEP, self.PYB_FREQ, (self.step_counter*self.PYB_TIMESTEP)/(time.time()-self.RESET_TIME)))
-        for i in range (self.NUM_DRONES):
-            print("[INFO] BaseAviary.render() ——— drone {:d}".format(i),
-                  "——— x {:+06.2f}, y {:+06.2f}, z {:+06.2f}".format(self.pos[i, 0], self.pos[i, 1], self.pos[i, 2]),
-                  "——— velocity {:+06.2f}, {:+06.2f}, {:+06.2f}".format(self.vel[i, 0], self.vel[i, 1], self.vel[i, 2]),
-                  "——— roll {:+06.2f}, pitch {:+06.2f}, yaw {:+06.2f}".format(self.rpy[i, 0]*self.RAD2DEG, self.rpy[i, 1]*self.RAD2DEG, self.rpy[i, 2]*self.RAD2DEG),
-                  "——— angular velocity {:+06.4f}, {:+06.4f}, {:+06.4f} ——— ".format(self.ang_v[i, 0], self.ang_v[i, 1], self.ang_v[i, 2]))
+    def render(self, mode="human", close=False):
+        combined = cv2.vconcat([cv2.cvtColor((255*self.rgb).astype(np.uint8), cv2.COLOR_RGBA2BGR), 
+                                cv2.cvtColor((self.seg).astype(np.uint8), cv2.COLOR_GRAY2BGR)])        
+        cv2.imshow("DroneCam", combined)
+        cv2.waitKey(1)
 
     def close(self):
         p.disconnect(physicsClientId=self.CLIENT)
+        cv2.destroyAllWindows()
+
+    def _initializePyBullet(self):
+        if self.GUI:
+            self.CLIENT = p.connect(p.GUI) # p.connect(p.GUI, options="--opengl2")
+            for i in [p.COV_ENABLE_RGB_BUFFER_PREVIEW, p.COV_ENABLE_DEPTH_BUFFER_PREVIEW, p.COV_ENABLE_SEGMENTATION_MARK_PREVIEW]: # Disable all debug visualizations
+                p.configureDebugVisualizer(i, 0, physicsClientId=self.CLIENT)
+            p.resetDebugVisualizerCamera(
+                cameraDistance=3,
+                cameraYaw=-30,
+                cameraPitch=-30,
+                cameraTargetPosition=[0, 0, 0],
+                physicsClientId=self.CLIENT,
+            )
+            ret = p.getDebugVisualizerCamera(physicsClientId=self.CLIENT)
+        else:
+            self.CLIENT = p.connect(p.DIRECT)
+            # p.setAdditionalSearchPath(pybullet_data.getDataPath()); plugin = p.loadPlugin(egl.get_filename(), "_eglRendererPlugin"); print("plugin=", plugin)
+
+        p.setGravity(0, 0, -self.G, physicsClientId=self.CLIENT)
+        p.setRealTimeSimulation(0, physicsClientId=self.CLIENT)
+        p.setTimeStep(self.PYB_TIMESTEP, physicsClientId=self.CLIENT)
+        p.setAdditionalSearchPath(
+            pybullet_data.getDataPath(), physicsClientId=self.CLIENT
+        )
+        p.setPhysicsEngineParameter(fixedTimeStep=self.PYB_TIMESTEP, numSubSteps=self.PYB_SUBSTESPS, physicsClientId=self.CLIENT)
+
+    def _addDrone(self):
+        self.DRONE_ID = p.loadURDF(
+            self.URDF,
+            self.INIT_XYZ,
+            p.getQuaternionFromEuler(self.INIT_RPYS),
+            flags=p.URDF_USE_INERTIA_FROM_FILE,
+            physicsClientId=self.CLIENT,
+        )
+        if self.GUI:
+            self._showDroneLocalAxes()
+        #### Remove default damping #################################
+        # p.changeDynamics(self.DRONE_ID, -1, linearDamping=0, angularDamping=0)
+
+    def _addObstacles(self):
+        self.PLANE_ID = p.loadURDF("plane.urdf", physicsClientId=self.CLIENT)
 
     def _housekeeping(self):
         #### Initialize/reset counters and zero-valued variables ###
@@ -156,67 +189,46 @@ class RacingEnv(gym.Env):
         self.Y_AX = -1
         self.Z_AX = -1
         self.last_input_switch = 0
-        self.last_action = np.zeros(4)
+        self.last_3_actions = np.zeros((3, 4))
 
         #### Initialize the drones kinemaatic information ##########
-        self.pos = np.zeros(3)
-        self.quat = np.zeros(4)
-        self.rpy = np.zeros(3)
+        self.pos = np.array(self.INIT_XYZ)
+        self.quat = np.array(p.getQuaternionFromEuler(self.INIT_RPYS))
+        self.rpy = np.array(self.INIT_RPYS)
         self.vel = np.zeros(3)
         self.ang_v = np.zeros(3)
         self.rpy_rates = np.zeros(3)
 
-        #### Set PyBullet's parameters #############################
-        p.setGravity(0, 0, -self.G, physicsClientId=self.CLIENT)
-        p.setRealTimeSimulation(0, physicsClientId=self.CLIENT)
-        p.setTimeStep(self.PYB_TIMESTEP, physicsClientId=self.CLIENT)
-        p.setAdditionalSearchPath(pybullet_data.getDataPath(), physicsClientId=self.CLIENT)
-
-        #### Load ground plane, drone and obstacles models #########
-        self.GATE_IDS = []
-        self.PLANE_ID = p.loadURDF("plane.urdf", physicsClientId=self.CLIENT)
-
-        self.DRONE_ID = p.loadURDF(
-            self.URDF,
-            self.INIT_XYZ,
-            p.getQuaternionFromEuler(self.INIT_RPYS),
-            flags=p.URDF_USE_INERTIA_FROM_FILE,
-            physicsClientId=self.CLIENT,
-        )
-        for position, orientation in zip(gate_positions, gate_orientations):
-            self.GATE_IDS.append(p.loadURDF("./models/gate/gate.urdf", position, orientation, useFixedBase=True))
-
-        #### Remove default damping #################################
-        # p.changeDynamics(self.DRONE_ID, -1, linearDamping=0, angularDamping=0)
-        if self.GUI:
-            self._showDroneLocalAxes()
+        #### Initialize the rate controller variables ##############
+        self.rate_error_sum = np.zeros(3)
 
     def _updateAndStoreKinematicInformation(self):
         self.pos, self.quat = p.getBasePositionAndOrientation(self.DRONE_ID, physicsClientId=self.CLIENT)
         self.rpy = p.getEulerFromQuaternion(self.quat)
         self.vel, self.ang_v = p.getBaseVelocity(self.DRONE_ID, physicsClientId=self.CLIENT)
         self.rpy_rates = np.dot(np.array(p.getMatrixFromQuaternion(self.quat)).reshape(3, 3).T, self.ang_v)
-        # print(self.rpy_rates)
-        
+
     def _getImages(self):
         rot_mat = np.array(p.getMatrixFromQuaternion(self.quat)).reshape(3, 3)
-        target = np.dot(rot_mat,np.array([1000, 0, 0])) + np.array(self.pos)
-        DRONE_CAM_VIEW = p.computeViewMatrix(cameraEyePosition=self.pos+np.array([0, 0, self.L]),
+        cameraPos = self.pos + np.dot(rot_mat, np.array([0.03, 0.0, 0.01]))
+        target = cameraPos + np.dot(rot_mat, np.array([1000, 0, 1000*np.tan(self.FPV_ANGLE)]))
+        droneUpVector = np.dot(rot_mat, np.array([0, 0, 1]))
+        DRONE_CAM_VIEW = p.computeViewMatrix(cameraEyePosition=cameraPos,
                                              cameraTargetPosition=target,
-                                             cameraUpVector=[0, 0, 1],
+                                             cameraUpVector=droneUpVector,
                                              physicsClientId=self.CLIENT
                                              )
-        DRONE_CAM_PRO =  p.computeProjectionMatrixFOV(fov=60.0,
+        DRONE_CAM_PRO =  p.computeProjectionMatrixFOV(fov=self.FOV,
                                                       aspect=1.0,
-                                                      nearVal=self.L,
-                                                      farVal=1000.0
+                                                      nearVal=self.NEAR,
+                                                      farVal=self.FAR,
                                                       )
-        [w, h, rgb, dep, seg] = p.getCameraImage(width=self.IMG_RES[0],
-                                                 height=self.IMG_RES[1],
+        w, h, rgb, dep, seg = p.getCameraImage(width=self.IMG_RES,
+                                                 height=self.IMG_RES,
                                                  shadow=0,
                                                  viewMatrix=DRONE_CAM_VIEW,
                                                  projectionMatrix=DRONE_CAM_PRO,
-                                                 flags=p.ER_SEGMENTATION_MASK_OBJECT_AND_LINKINDEX,
+                                                 flags=p.ER_NO_SEGMENTATION_MASK,
                                                  physicsClientId=self.CLIENT
                                                  )
         rgb = np.reshape(rgb, (h, w, 4))
@@ -225,9 +237,9 @@ class RacingEnv(gym.Env):
         return rgb, dep, seg
 
     def _PyBulletDynamics(self, rpm):
-        forces = np.array(rpm**2)*self.KF
-        torques = np.array(rpm**2)*self.KM
-        z_torque = (-torques[0] + torques[1] - torques[2] + torques[3])
+        forces = np.array(rpm**2) * self.KF
+        torques = np.array(rpm**2) * self.KM
+        z_torque = -torques[0] + torques[1] - torques[2] + torques[3]
         for i in range(4):
             p.applyExternalForce(self.DRONE_ID,
                                  i,
@@ -243,8 +255,8 @@ class RacingEnv(gym.Env):
                               physicsClientId=self.CLIENT
                               )
         base_rot = np.array(p.getMatrixFromQuaternion(self.quat)).reshape(3, 3)
-        drag_factors = -1 * self.DRAG_COEFF * np.sum(np.array(2*np.pi*rpm/60))
-        drag = np.dot(base_rot.T, drag_factors*np.array(self.vel))
+        drag_factors = -1 * self.DRAG_COEFF * np.sum(np.array(2 * np.pi * rpm / 60))
+        drag = np.dot(base_rot.T, drag_factors * np.array(self.vel))
 
         p.applyExternalForce(self.DRONE_ID,
                              4,
@@ -254,60 +266,17 @@ class RacingEnv(gym.Env):
                              physicsClientId=self.CLIENT
                              )
 
-    def _PythonDynamics(self, rpm):
-        #### Current state #########################################
-        pos = self.pos
-        quat = self.quat
-        vel = self.vel
-        rpy_rates = self.rpy_rates
-        rotation = np.array(p.getMatrixFromQuaternion(quat)).reshape(3, 3)
-        #### Compute forces and torques ############################
-        forces = np.array(rpm**2) * self.KF
-        thrust = np.array([0, 0, np.sum(forces)])
-        thrust_world_frame = np.dot(rotation, thrust)
-        force_world_frame = thrust_world_frame - np.array([0, 0, self.WEIGHT])
-        z_torques = np.array(rpm**2)*self.KM
-        z_torque = (-z_torques[0] + z_torques[1] - z_torques[2] + z_torques[3])
-        x_torque = (forces[0] + forces[1] - forces[2] - forces[3]) * (self.L/np.sqrt(2))
-        y_torque = (- forces[0] + forces[1] + forces[2] - forces[3]) * (self.L/np.sqrt(2))
-        torques = np.array([x_torque, y_torque, z_torque])
-        torques = torques - np.cross(rpy_rates, np.dot(self.J, rpy_rates))
-        rpy_rates_deriv = np.dot(self.J_INV, torques)
-        no_pybullet_dyn_accs = force_world_frame / self.M
-        #### Update state ##########################################
-        vel = vel + self.PYB_TIMESTEP * no_pybullet_dyn_accs
-        rpy_rates = rpy_rates + self.PYB_TIMESTEP * rpy_rates_deriv
-        pos = pos + self.PYB_TIMESTEP * vel
-        quat = self._integrateQ(quat, rpy_rates, self.PYB_TIMESTEP)
-        #### Set PyBullet's state ##################################
-        p.resetBasePositionAndOrientation(self.DRONE_ID,
-                                          pos,
-                                          quat,
-                                          physicsClientId=self.CLIENT
-                                          )
-        #### Note: the base's velocity only stored and not used ####
-        p.resetBaseVelocity(self.DRONE_ID,
-                            vel,
-                            np.dot(rotation, rpy_rates),
-                            physicsClientId=self.CLIENT
-                            )
-        #### Store the roll, pitch, yaw rates for the next step ####
-        self.rpy_rates = rpy_rates
-
-    def _integrateQ(self, quat, omega, dt):
-        omega_norm = np.linalg.norm(omega)
-        p, q, r = omega
-        if np.isclose(omega_norm, 0):
-            return quat
-        lambda_ = np.array([
-            [ 0,  r, -q, p],
-            [-r,  0,  p, q],
-            [ q, -p,  0, r],
-            [-p, -q, -r, 0]
-        ]) * .5
-        theta = omega_norm * dt / 2
-        quat = np.dot(np.eye(4) * np.cos(theta) + 2 / omega_norm * lambda_ * np.sin(theta), quat)
-        return quat
+        # # Fix drones position at origin
+        # p.resetBasePositionAndOrientation(self.DRONE_ID,
+        #                                     self.INIT_XYZ,
+        #                                     self.quat,
+        #                                     physicsClientId=self.CLIENT
+        #                                     )
+        # p.resetBaseVelocity(self.DRONE_ID,
+        #                     [0, 0, 0],
+        #                     np.dot(base_rot, self.rpy_rates),
+        #                     physicsClientId=self.CLIENT
+        #                     )
 
     def _showDroneLocalAxes(self):
         AXIS_LENGTH = 2*self.L
@@ -364,69 +333,45 @@ class RacingEnv(gym.Env):
         return M, L, THRUST2WEIGHT_RATIO, J, J_INV, KF, KM, COLLISION_H, COLLISION_R, COLLISION_Z_OFFSET, MAX_SPEED_KMH, \
                GND_EFF_COEFF, PROP_RADIUS, DRAG_COEFF, DW_COEFF_1, DW_COEFF_2, DW_COEFF_3
 
-    def _computeObs(self):
-        self.rgb, self.dep, self.seg = self._getImages()
-        gate_mask = np.zeros_like(self.seg)
-        for gate_id in self.GATE_IDS:
-            gate_mask += (self.seg == gate_id)
-        return gate_mask.astype('float32')
-
-    def rate_2_rpm(self, action):
+    def _rateController(self, action):
         thrust = action[0] * self.MAX_THRUST
-        desired_rate = np.array([action[1], action[2], action[3]])  # roll, pitch, yaw rate
-        rate_error = desired_rate
-        torque = np.dot(self.J, 10 * rate_error)  # Added P-gain here
-        print(100*torque)
-        MixerMatrix = np.array([
-            np.array([1,  1,  1,  1], dtype=np.float32),                      # Total thrust
-            np.array([-1,  1,  1, -1], dtype=np.float32) * self.L/np.sqrt(2),  # Roll torque
-            np.array([ 1,  1, -1, -1], dtype=np.float32) * self.L/np.sqrt(2),  # Pitch torque
-            np.array([-1,  1, -1,  1], dtype=np.float32) * self.KM            # Yaw torque
-        ])
 
-        forces = MixerMatrix @ np.array([thrust, torque[0], torque[1], torque[2]])
-        forces = np.clip(forces, 0, self.MAX_THRUST/4)  # Prevent negative values
+        if thrust < 0.1:
+            self.rate_error_sum = np.zeros(3) # Reset the integral term
+
+        desired_rate = self.RATE_SCALE * np.array([action[1], action[2], action[3]])  # roll, pitch, yaw rate
+        rate_error = desired_rate - self.rpy_rates
+        self.rate_error_sum += rate_error*self.CTRL_TIMESTEP
+        torque = np.dot(self.J, self.P_GAIN * rate_error + self.I_GAIN * self.rate_error_sum)
+
+        MixerMatrix = np.array([
+            np.array([ 1,  1,  1,  1], dtype=np.float32),                       # Total thrust
+            np.array([-1, -1,  1,  1], dtype=np.float32) * self.L/np.sqrt(2),   # Roll torque
+            np.array([-1,  1,  1, -1], dtype=np.float32) * self.L/np.sqrt(2),  # Pitch torque
+            0.0005*np.array([-1,  1, -1,  1], dtype=np.float32) * self.KF/self.KM     # Yaw torque
+        ])/4
+
+        forces = MixerMatrix.T @ np.array([thrust, torque[0], torque[1], torque[2]])
+        forces = np.clip(forces, 0, self.MAX_THRUST / 4)  # Thrust Saturation
         rpm = np.sqrt(forces / self.KF)  # Convert to RPM
-        # print(forces)
-        print('RPM:', rpm)
+
+        # print("Action:", action)
+        # print("Thrust:", thrust)
+        # print("Error", rate_error)
+        # print("Torque:", torque)
+        # print('Forces:', forces)
+        # print('RPM:', rpm)
+        # print()
 
         return rpm
 
+    def _computeObs(self):
+        raise NotImplementedError
     def _computeReward(self):
-        return 0.0
-
+        raise NotImplementedError
     def _computeTerminated(self):
-        return False
-
+        raise NotImplementedError
     def _computeTruncated(self):
-        return False
-
+        raise NotImplementedError
     def _computeInfo(self):
-        return {"answer": 42} #### Calculated by the Deep Thought supercomputer in 7.5M years
-
-if __name__ == "__main__":
-    env = RacingEnv("./models/cf2/cf2x.urdf", gui=True)
-    obs, info = env.reset()
-
-    pygame.init()
-    pygame.joystick.init()
-    joystick = pygame.joystick.Joystick(0)
-    joystick.init()
-
-    while True:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                raise KeyboardInterrupt
-
-        thrust = (joystick.get_axis(2) + 1) / 2
-        roll = joystick.get_axis(3)
-        pitch = joystick.get_axis(1)
-        yaw = -joystick.get_axis(0)
-
-        action = np.array([thrust, roll, pitch, yaw])
-        obs, reward, terminated, truncated, info = env.step(action)
-        if terminated:
-            break
-
-    env.close()
-    pygame.quit()
+        raise NotImplementedError
