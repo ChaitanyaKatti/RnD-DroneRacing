@@ -783,7 +783,7 @@ def resetBaseVelocity(objectUniqueId:int,linearVelocity:list[float],angularVeloc
     pass
 
 def resetDebugVisualizerCamera(cameraDistance:float,cameraYaw:float,cameraPitch:float,cameraTargetPosition:list[float],physicsClientId:int=0) -> None: # real signature unknown
-    """ For the 3D OpenGL Visualizer, set the camera distance, yaw, pitch and target position. 
+    """ For the 3D OpenGL Visualizer, set the camera distance, yaw, pitch and target position.
     Example: pybullet.resetDebugVisualizerCamera( cameraDistance=3, cameraYaw=30,cameraPitch=52, cameraTargetPosition=[0,0,0])"""
     pass
 
