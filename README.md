@@ -21,7 +21,7 @@ python3 learn.py
 
 ## To-Do
 - [x] PyBullet Drone Environment
-- [x] Asynchronous Actor-Critic PPO
+- [x] Asymmetric Actor-Critic PPO
 - [x] Feature Encoder
 - [x] Dataset Generator along trajectory with noise
 - [ ] Hyperparameter Tuning

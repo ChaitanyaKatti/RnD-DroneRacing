@@ -1,7 +1,7 @@
 LEARNING_RATE = 3e-4
-MINI_BATCH_SIZE = 32 # 16, 32, 64, 128
-N_EPOCHS = 8 # 4, 8, 16, 32
-N_STEPS = 4096 # 1024, 2048, 4096, 8192
+MINI_BATCH_SIZE = 32    # 16, 32, 64, 128
+N_EPOCHS = 8            # 4, 8, 16, 32
+N_STEPS = 4096          # 1024, 2048, 4096, 8192
 EVAL_FREQ = N_STEPS * 2
 
 POLICY_LATENT_DIM = 128
@@ -11,4 +11,4 @@ REWARD_THRESHOLD = 1.0
 
 IMG_RES = 84
 
-SAVE_PATH = "logs/default_params"
+LOG_DIR = "logs/default_params"
